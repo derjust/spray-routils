@@ -1,8 +1,7 @@
 package org.caoilte.spray.routing
 
-import akka.testkit.TestKit
 import org.caoilte.spray.routing.TestAccessLogger.TestAccessLogger
-import spray.http.{HttpResponse, HttpRequest, HttpEntity, ContentTypes}
+import spray.http._
 import spray.routing._
 import akka.actor.{Props, ActorRef, Actor}
 import scala.concurrent._
@@ -15,7 +14,7 @@ object TestAccessLogger {
   case object LogAccess extends LogType
   case object AccessAlreadyLogged extends LogType
 
-  case class LogEvent(request: HttpRequest, response: HttpResponse, time: Long, logAccessType: LogType)
+  case class LogEvent(request: HttpRequest, response: HttpMessagePart, time: Long, logAccessType: LogType)
 
   class TestAccessLogger(listener:ActorRef) extends AccessLogger {
     override def logAccess(request: HttpRequest, response: HttpResponse, time: Long) = {
@@ -28,6 +27,69 @@ object TestAccessLogger {
   }
 }
 
+case object ChunkedResponse {
+  val DEFAULT_RESPONSE = "response"
+}
+
+case class ChunkedResponse(amountOfChunks: Int, thinkingMillis: Long, responseMessage:String = ChunkedResponse.DEFAULT_RESPONSE)
+
+object ChunkedResponseServiceActor {
+  def factory(chunkedResponse: ChunkedResponse, path:String): (ActorRef => Props) = actorRef => {
+    apply(new TestAccessLogger(actorRef), chunkedResponse, path)
+  }
+  def apply(accessLogger: AccessLogger, chunkedResponse: ChunkedResponse, path:String):Props = {
+    Props(new ChunkedResponseServiceActor(accessLogger, chunkedResponse, path))
+  }
+}
+
+class ChunkedResponseServiceActor(val accessLogger: AccessLogger, chunkedResponse: ChunkedResponse, path:String)
+  extends HttpServiceActor with LogAccessRoutingActor {
+
+  case class RequestForChunkedResponse(ctx: RequestContext)
+  case class Ok(ctx: RequestContext, remainingChunks: Int)
+
+  class ChunkedResponseActor(response:ChunkedResponse) extends Actor {
+    import response._
+    def receive: Receive = {
+      case RequestForChunkedResponse(ctx) => {
+        blocking {
+          Thread.sleep(thinkingMillis)
+        }
+        ctx.responder ! ChunkedResponseStart(HttpResponse()).withAck(Ok(ctx, amountOfChunks))
+      }
+      case Ok(ctx, 0) => {
+        ctx.responder ! ChunkedMessageEnd.withAck(new Object)
+      }
+      case Ok(ctx, remainingChunks) => {
+        blocking {
+          Thread.sleep(thinkingMillis)
+        }
+
+        ctx.responder ! MessageChunk(s"$responseMessage $remainingChunks\n").withAck(Ok(ctx, remainingChunks - 1))
+      }
+    }
+  }
+
+  var testAc:ActorRef = _
+
+  implicit def executionContext = actorRefFactory.dispatcher
+
+  override def preStart {
+    testAc = context.actorOf(Props(new ChunkedResponseActor(chunkedResponse)), "chunked-response-test-actor")
+    super.preStart
+  }
+
+  val routes:Route = {
+    path(path) {
+      get { ctx: RequestContext =>
+        implicit val TIMEOUT: Timeout = Timeout(chunkedResponse.thinkingMillis * 2, TimeUnit.MILLISECONDS)
+        testAc ! RequestForChunkedResponse(ctx)
+      }
+    }
+  }
+
+  override def receive = runRoute(routes)
+}
 
 case object DelayedResponse {
   val DEFAULT_RESPONSE = "response"

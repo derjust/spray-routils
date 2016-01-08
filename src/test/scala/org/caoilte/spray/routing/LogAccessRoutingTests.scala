@@ -33,6 +33,28 @@ object FailureRoutes extends Directives {
 
 class LogAccessRoutingTests extends FlatSpec with ScalaFutures with GivenWhenThen {
 
+  behavior of "An HTTP Server that handles a request with a 200 chunked response within the request timeout"
+
+  it should "'Log Access' with a 200 chunked response and an Access Time less than the request timeout" in {
+    aTestLogAccessRoutingActor(
+      requestTimeoutMillis = 4000,
+      httpServiceActorFactory = ChunkedResponseServiceActor.factory(ChunkedResponse(12, 500), PATH)) { testKit =>
+      import testKit._
+
+      whenReady(makeHttpCall(), timeout(Span(8, Seconds))) { s =>
+        assert(s.entity.asString(HttpCharsets.`UTF-8`) === "response 12\nresponse 11\nresponse 10\nresponse 9\n"
+                                                         + "response 8\nresponse 7\nresponse 6\nresponse 5\n"
+                                                         + "response 4\nresponse 3\nresponse 2\nresponse 1\n")}
+
+      expectMsgPF(8 seconds, "Expected normal log access event with chunked response delayed properties") {
+        case LogEvent(
+        HttpRequest(HttpMethods.GET,URI, _, _, _),
+        HttpResponse(StatusCodes.OK, _, _, _), time, LogAccess
+        ) if time >= 500 && time <= 7000 => true
+      }
+    }
+  }
+
   behavior of "An HTTP Server that handles a request with a 200 response within the request timeout"
 
   it should "'Log Access' with a 200 response and an Access Time less than the request timeout" in {
@@ -194,7 +216,7 @@ class LogAccessRoutingTests extends FlatSpec with ScalaFutures with GivenWhenThe
   }
 
 
-  implicit val TIMEOUT: Timeout = 3.second
+  implicit val TIMEOUT: Timeout = 10.second
   val PORT = 8084
   val HOST = s"http://localhost:$PORT"
   val PATH = "test"

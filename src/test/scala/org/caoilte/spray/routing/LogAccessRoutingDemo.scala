@@ -5,7 +5,7 @@ import akka.io.{Tcp, IO}
 import spray.can.Http
 import scala.concurrent.{Await, Future}
 import akka.pattern.ask
-import spray.http.{HttpResponse, HttpRequest}
+import spray.http.{ChunkedResponseStart, ChunkedMessageEnd, HttpResponse, HttpRequest}
 import com.typesafe.config.ConfigFactory
 import akka.util.Timeout
 import scala.concurrent.duration._

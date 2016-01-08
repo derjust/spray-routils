@@ -37,7 +37,14 @@ class RequestAccessLogger(ctx: RequestContext, accessLogger: AccessLogger,
   import ctx._
 
   import context.dispatcher
-  val cancellable:Cancellable = context.system.scheduler.scheduleOnce(requestTimeout, self, RequestLoggingTimeout)
+  var cancellable:Cancellable = context.system.scheduler.scheduleOnce(requestTimeout, self, RequestLoggingTimeout)
+  var chunkedResponse:HttpResponse = null
+
+  def handleChunkedResponseStart(wrapper: Any, response: HttpResponse) = {
+    // In case a chunk transfer is started, store the response for later logging
+    chunkedResponse = response
+    responder forward wrapper
+  }
 
   def receive = {
     case RequestLoggingTimeout => {
@@ -55,6 +62,26 @@ class RequestAccessLogger(ctx: RequestContext, accessLogger: AccessLogger,
       accessLogger.logAccess(request, response, timeStampCalculator(Unit))
       forwardMsgAndStop(response)
     }
+
+    case confirmed@Confirmed(ChunkedResponseStart(response), _) => handleChunkedResponseStart(confirmed, response)
+    case unconfirmed@ChunkedResponseStart(response) => handleChunkedResponseStart(unconfirmed, response)
+
+    case confirmed@(Confirmed(MessageChunk(_,_), _) | MessageChunk) => {
+      // Each chunk is considered a heart-beat: We are still producing output and the client is still consuming
+      // - therefore reset the requestTimeout schedule
+      cancellable.cancel()
+      cancellable = context.system.scheduler.scheduleOnce(requestTimeout, self, RequestLoggingTimeout)
+
+      responder forward confirmed
+    }
+
+    case confirmed@(Confirmed(ChunkedMessageEnd, _) | ChunkedMessageEnd) => {
+      // Handled like HttpResponse: provide the (previously saved) ChunkedResponseStart for logging and quit
+      cancellable.cancel()
+      accessLogger.logAccess(request, chunkedResponse, timeStampCalculator(Unit))
+      forwardMsgAndStop(confirmed)
+    }
+
     case other => {
       responder forward other
     }
