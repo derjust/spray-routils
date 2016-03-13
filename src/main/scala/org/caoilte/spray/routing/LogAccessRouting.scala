@@ -1,6 +1,10 @@
 package org.caoilte.spray.routing
 
+import akka.io.Tcp
 import com.typesafe.config.Config
+import spray.can.Http
+import spray.can.Http.{Command, RegisterChunkHandler}
+import spray.httpx.marshalling.{ToResponseMarshallingContext, ToResponseMarshaller}
 import spray.routing._
 import akka.actor._
 import scala.concurrent.duration._
@@ -33,16 +37,16 @@ object RequestAccessLogger {
 }
 
 class RequestAccessLogger(ctx: RequestContext, accessLogger: AccessLogger,
-                          timeStampCalculator:(Unit => Long), requestTimeout:FiniteDuration) extends Actor {
+                          timeStampCalculator:(Unit => Long), requestTimeout:FiniteDuration) extends Actor with ActorLogging {
   import ctx._
 
   import context.dispatcher
   var cancellable:Cancellable = context.system.scheduler.scheduleOnce(requestTimeout, self, RequestLoggingTimeout)
-  var chunkedResponse:HttpResponse = null
+  var chunkedResponse:Option[HttpResponse] = Option.empty
 
   def handleChunkedResponseStart(wrapper: Any, response: HttpResponse) = {
     // In case a chunk transfer is started, store the response for later logging
-    chunkedResponse = response
+    chunkedResponse = Option(response)
     responder forward wrapper
   }
 
@@ -54,7 +58,18 @@ class RequestAccessLogger(ctx: RequestContext, accessLogger: AccessLogger,
           s"'${requestTimeout}'."))
 
       accessLogger.logAccess(request, errorResponse, requestTimeout.toMillis)
-      ctx.complete(errorResponse)
+
+      if (chunkedResponse.isDefined) {
+        // There was already a ChunkedResponseStart thus the transfer is in-flight. There is no reasonable response
+        // that could be sent because that would be queued by spray itself - and we can not predict what the client will
+        // do with any content we append at the current state of the chunked message stream.
+        // Therefore the whole connection is just aborted
+        log.debug(s"timed out waiting for the request to complete after ${requestTimeout} - Aborting connection")
+        ctx.responder ! Tcp.Abort
+      } else {
+        log.debug(s"timed out waiting for the request to complete after ${requestTimeout} - Sending ${errorResponse}")
+        ctx.complete(errorResponse)
+      }
       context.stop(self)
     }
     case response:HttpResponse => {
@@ -78,7 +93,7 @@ class RequestAccessLogger(ctx: RequestContext, accessLogger: AccessLogger,
     case confirmed@(Confirmed(ChunkedMessageEnd, _) | ChunkedMessageEnd) => {
       // Handled like HttpResponse: provide the (previously saved) ChunkedResponseStart for logging and quit
       cancellable.cancel()
-      accessLogger.logAccess(request, chunkedResponse, timeStampCalculator(Unit))
+      accessLogger.logAccess(request, chunkedResponse.get, timeStampCalculator(Unit))
       forwardMsgAndStop(confirmed)
     }
 

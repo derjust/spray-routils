@@ -190,6 +190,28 @@ class LogAccessRoutingTests extends FlatSpec with ScalaFutures with GivenWhenThe
     }
   }
 
+  behavior of "An HTTP Server that doesn't complete within 100 times the request timeout with a chunked response"
+
+  it should "'Log Access' with a connection abort and an Access Time equal to the configured Request Timeout time" in {
+
+    aTestLogAccessRoutingActor(
+      requestTimeoutMillis = 500,
+      httpServiceActorFactory = ChunkedResponseServiceActor.factory(ChunkedResponse(12, 2000), PATH)) { testKit =>
+      import testKit._
+
+      whenReady(makeHttpCall(), timeout(Span(2, Seconds))) { s =>
+        assert(s.status.intValue == 500)
+        println(s.entity.toOption.get.contentType)
+      }
+
+      expectMsgPF(2 seconds, "Expected normal log access access event with timeout properties") {
+        case LogEvent(
+        HttpRequest(HttpMethods.GET,URI, _, _, _),
+        HttpResponse(StatusCodes.InternalServerError, _, _, _), 500, LogAccess
+        ) => true
+      }
+    }
+  }
 
   behavior of "An HTTP Server that handles a JSON request with a TXT response within the request timeout"
 
@@ -231,6 +253,9 @@ class LogAccessRoutingTests extends FlatSpec with ScalaFutures with GivenWhenThe
       |    idle-timeout = 10 s
       |    registration-timeout = 100 s
       |    routils-request-timeout = $requestTimeout
+      |  }
+      |  host-connector {
+      |    max-retries = 0
       |  }
       |}
       |akka {
