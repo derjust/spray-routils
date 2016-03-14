@@ -93,7 +93,9 @@ class RequestAccessLogger(ctx: RequestContext, accessLogger: AccessLogger,
     case confirmed@(Confirmed(ChunkedMessageEnd, _) | ChunkedMessageEnd) => {
       // Handled like HttpResponse: provide the (previously saved) ChunkedResponseStart for logging and quit
       cancellable.cancel()
-      accessLogger.logAccess(request, chunkedResponse.get, timeStampCalculator(Unit))
+      accessLogger.logAccess(request, chunkedResponse.getOrElse({
+        log.warning(s"Never received a ChunkedResponseStart before this '$confirmed' - thus returning NULL to AccessLogger '$accessLogger'")
+        null}), timeStampCalculator(Unit))
       forwardMsgAndStop(confirmed)
     }
 
